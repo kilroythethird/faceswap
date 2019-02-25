@@ -7,9 +7,235 @@ import queue as Queue
 import sys
 import threading
 from lib.logger import LOG_QUEUE, set_root_logger
+from ctypes import c_float
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 _launched_processes = set()  # pylint: disable=invalid-name
+
+
+from multiprocessing.sharedctypes import RawArray
+import numpy as np
+import queue
+
+class ConsumerBuffer():
+    def __init__(self, dispatcher, index, data):
+        self._data = data
+        self._id = index
+        self._dispatcher = dispatcher
+    
+    def get(self):
+        return self._data
+    
+    def free(self):
+        self._dispatcher.free(self._id)
+        
+    def __enter__(self):
+        return self.get()
+        
+    def __exit__(self, *args):
+        self.free()
+
+        
+class WorkerBuffer():
+    def __init__(self, index, data, stop_event, queue):
+        self._id = index
+        self._data = data
+        self._stop_event = stop_event
+        self._queue = queue
+
+    def get(self):
+        return self._data
+    
+    def ready(self):
+        if self._stop_event.is_set():
+            return
+        self._queue.put(self._id)
+        
+    def __enter__(self):
+        return self.get()
+        
+    def __exit__(self, *args):
+        self.ready()
+        
+
+class FixedProducerDispatcher():
+    """
+    Runs the given target_function in N subprocesses and provides fixed size shared memory to the target_function.
+    This class is designed for endless running worker processes filling the provided memory with data,
+    like preparing trainingsdata for neural network training.
+    
+    As soon as one worker finishes all worker are shutdown.
+    
+    Example:
+        # Producer side
+        def do_work(memory_gen):
+            for memory_wrap in memory_gen:
+                with memory_wrap as memory:  # alternative memory_wrap.get and memory_wrap.ready can be used
+                    input, exp_result = prepare_batch(...)
+                    memory[0][:] = input
+                    memory[1][:] = exp_result
+                    
+        # Consumer side
+        batch_size = 64
+        dispatcher = FixedProducerDispatcher(do_work, shapes=[(batch_size, 256,256,3), (batch_size, 256,256,3)])
+        for batch_wrapper in dispatcher:
+            with batch_wrapper as batch:  # alternative batch_wrapper.get and batch_wrapper.free can be used
+                send_batch_to_trainer(batch)
+    """
+    EVENT = mp.Event
+    QUEUE = mp.Queue
+    
+    def __init__(self, target_function, shapes, *args, ctype=c_float, worker_processes=1, buffers=2, log_queue=None, **kwargs):
+        """
+        TODO: bla
+        """
+        assert buffers >= 2
+        assert buffers > worker_processes
+        self.name = "%s_FixedProducerDispatcher" % str(target_function) # This sucks, but otherwise terminate_processes complains
+        self._target_func = target_function
+        self._shapes = shapes
+        self._stop_event = self.EVENT()
+        self._buffer_tokens = self.QUEUE()
+        for i in range(buffers):
+            self._buffer_tokens.put(i)
+        self._result_tokens = self.QUEUE()
+        worker_data, self.data = self._create_data(shapes, ctype, buffers)
+        kwargs.update({
+            'data' : worker_data,
+            'stop_event' : self._stop_event,
+            'target' : self._target_func,
+            'buffer_tokens': self._buffer_tokens,
+            'result_tokens': self._result_tokens,
+            'dtype': np.dtype(ctype),
+            'shapes': shapes,
+            'log_queue': log_queue,
+        })
+        self._worker = tuple(self._create_worker(args, kwargs) for _ in range(worker_processes))
+        self._open_worker = len(self._worker) # TODO: should probably switch to an threading.semaphore here ?
+
+    def _np_from_shared(self, shared, shapes, dtype):
+        arrs = []
+        offset = 0
+        np_data = np.frombuffer(shared, dtype=dtype)
+        for shape in shapes:
+            count = np.prod(shape)
+            arrs.append(np_data[offset:offset+count].reshape(shape))
+            offset += count
+        return arrs
+    
+    def _create_data(self, shapes, ctype, buffers):
+        buffer_size = int(sum(np.prod(x) for x in shapes))
+        dtype = np.dtype(ctype)
+        data = tuple(RawArray(ctype, buffer_size) for _ in range(buffers))
+        np_data = tuple(self._np_from_shared(arr, shapes, dtype) for arr in data)
+        return data, np_data
+
+    def _create_worker(self, args, kwargs):
+        return mp.Process(target=self._runner, args=args, kwargs=kwargs)
+        
+    def free(self, index):
+        if self._stop_event.is_set():
+            return
+        if isinstance(index, ConsumerBuffer):
+            index = index.index
+        self._buffer_tokens.put(index)
+        
+    def __iter__(self):
+        return self
+        
+    def __next__(self):
+        return self.next()
+        
+    def next(self, block=True, timeout=None):
+        """
+        Yields ConsumerBuffer filled by the worker.
+        Will raise StopIteration if no more elements are available OR any worker is finished.
+        Will raise queue.Empty when block is False and no element is available.
+        
+        The returned data is safe until ConsumerBuffer.free() is called or the with context is left.
+        If you plan to hold on to it after that make a copy.
+        
+        This method is thread safe.
+        """
+        if self._stop_event.is_set():
+            raise StopIteration
+        i = self._result_tokens.get(block=block, timeout=timeout)
+        if self._stop_event.is_set():
+            raise StopIteration
+        if i is None:
+            self._open_worker -= 1
+            raise StopIteration
+        d = self.data[i]
+        return ConsumerBuffer(self, i, d)
+        
+    def start(self):
+        for process in self._worker:
+            process.start()
+        _launched_processes.add(self)
+    
+    def is_alive(self):
+        # TODO: need to be overwriten for the threading version probably
+        for worker in self._worker:
+            if worker.is_alive():
+                return True
+        return False
+    
+    def join(self):
+        self.stop()
+        while self._open_worker:
+            if self._result_tokens.get() is None:
+                self._open_worker -= 1
+        while True:
+            try:
+                self._buffer_tokens.get(block=False, timeout=0.01)
+            except queue.Empty: break
+        for worker in self._worker:
+            worker.join()
+        
+    def stop(self):
+        self._stop_event.set()
+        for _ in range(self._open_worker):
+            self._buffer_tokens.put(None)
+
+    def _runner(self, *args, data=None, stop_event=None, target=None, buffer_tokens=None, result_tokens=None, dtype=None, shapes=None, log_queue=None, **kwargs):
+        if not log_queue is None:
+            set_root_logger(queue=log_queue)
+        np_data = [self._np_from_shared(d, shapes, dtype) for d in data]
+        def get_free_slot():
+            while not stop_event.is_set():
+                i = buffer_tokens.get()
+                if stop_event.is_set() or i is None:
+                    break
+                yield WorkerBuffer(i, np_data[i], stop_event, result_tokens)
+
+        args = tuple((get_free_slot(),)) + tuple(args)
+        try:
+            target(*args, **kwargs)
+        except (Exception) as e:
+            logger.exception(e)
+            stop_event.set()
+        result_tokens.put(None)
+
+
+class FixedProducerDispatcherThreaded(FixedProducerDispatcher):
+    EVENT = threading.Event
+    QUEUE = queue.Queue
+    
+    def _create_data(self, shapes, ctype, buffers):
+        buffer = []
+        for _ in range(buffers): 
+            np_data = list(np.ndarray(shape=shape, dtype=np.dtype(ctype)) for shape in shapes)
+            buffer.append(np_data)
+        return buffer, buffer
+
+    def _create_worker(self, args, kwargs):
+        return threading.Thread(target=self._runner, args=args, kwargs=kwargs)
+    
+    def _np_from_shared(self, shared, shapes, dtype):
+        return shared
+
+
+
 
 
 class PoolProcess():
