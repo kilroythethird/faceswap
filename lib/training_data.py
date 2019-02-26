@@ -16,7 +16,7 @@ from lib.queue_manager import queue_manager
 from lib.umeyama import umeyama
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
-
+from MyTimeit import timeit
 
 class TrainingDataGenerator():
     """ Generate training data for models """
@@ -128,41 +128,46 @@ class TrainingDataGenerator():
 
     def process_face(self, filename, side, is_timelapse):
         """ Load an image and perform transformation and warping """
-        logger.trace("Process face: (filename: '%s', side: '%s', is_timelapse: %s)",
-                     filename, side, is_timelapse)
-        try:
-            image = cv2.imread(filename)  # pylint: disable=no-member
-        except TypeError:
-            raise Exception("Error while reading image", filename)
+        with timeit.log("process_face(side=%s)" % side):
+            logger.trace("Process face: (filename: '%s', side: '%s', is_timelapse: %s)",
+                         filename, side, is_timelapse)
+            try:
+                with timeit.log("cv2.imread"):
+                    image = cv2.imread(filename)  # pylint: disable=no-member
+            except TypeError:
+                raise Exception("Error while reading image", filename)
+    
+            if self.mask_function or self.training_opts["warp_to_landmarks"]:
+                src_pts = self.get_landmarks(filename, image, side)
+            if self.mask_function:
+                with timeit.log("mask_function"):
+                    image = self.mask_function(src_pts, image, channels=4)
+    
+            image = self.processing.color_adjust(image)
+    
+            if not is_timelapse:
+                image = self.processing.random_transform(image)
+                if not self.training_opts["no_flip"]:
+                    image = self.processing.do_random_flip(image)
+            sample = image.copy()[:, :, :3]
+    
+            if self.training_opts["warp_to_landmarks"]:
+                dst_pts = self.get_closest_match(filename, side, src_pts)
+                processed = self.processing.random_warp_landmarks(image, src_pts, dst_pts)
+            else:
+                processed = self.processing.random_warp(image)
+    
+            processed.insert(0, sample)
+            logger.trace("Processed face: (filename: '%s', side: '%s', shapes: %s)",
+                         filename, side, [img.shape for img in processed])
+            return processed
 
-        if self.mask_function or self.training_opts["warp_to_landmarks"]:
-            src_pts = self.get_landmarks(filename, image, side)
-        if self.mask_function:
-            image = self.mask_function(src_pts, image, channels=4)
-
-        image = self.processing.color_adjust(image)
-
-        if not is_timelapse:
-            image = self.processing.random_transform(image)
-            if not self.training_opts["no_flip"]:
-                image = self.processing.do_random_flip(image)
-        sample = image.copy()[:, :, :3]
-
-        if self.training_opts["warp_to_landmarks"]:
-            dst_pts = self.get_closest_match(filename, side, src_pts)
-            processed = self.processing.random_warp_landmarks(image, src_pts, dst_pts)
-        else:
-            processed = self.processing.random_warp(image)
-
-        processed.insert(0, sample)
-        logger.trace("Processed face: (filename: '%s', side: '%s', shapes: %s)",
-                     filename, side, [img.shape for img in processed])
-        return processed
-
+    @timeit.timeit()
     def get_landmarks(self, filename, image, side):
         """ Return the landmarks for this face """
         logger.trace("Retrieving landmarks: (filename: '%s', side: '%s'", filename, side)
-        lm_key = sha1(image).hexdigest()
+        with timeit.log("sha1(image)"):
+            lm_key = sha1(image).hexdigest()
         try:
             src_points = self.landmarks[side][lm_key]
         except KeyError:
@@ -171,6 +176,7 @@ class TrainingDataGenerator():
         logger.trace("Returning: (src_points: %s)", src_points)
         return src_points
 
+    @timeit.timeit()
     def get_closest_match(self, filename, side, src_points):
         """ Return closest matched landmarks from opposite set """
         logger.trace("Retrieving closest matched landmarks: (filename: '%s', src_points: '%s'",
@@ -231,6 +237,7 @@ class ImageManipulation():
         logger.trace("Coverage: %s", coverage)
         return coverage
 
+    @timeit.timeit()
     def random_transform(self, image):
         """ Randomly transform an image """
         logger.trace("Randomly transforming image")
@@ -250,7 +257,8 @@ class ImageManipulation():
 
         logger.trace("Randomly transformed image")
         return result
-
+    
+    @timeit.timeit()
     def do_random_flip(self, image):
         """ Perform flip on image if random number is within threshold """
         logger.trace("Randomly flipping image")
@@ -262,7 +270,8 @@ class ImageManipulation():
             retval = image
         logger.trace("Randomly flipped image")
         return retval
-
+    
+    @timeit.timeit()
     def random_warp(self, image):
         """ get pair of random warped images from aligned face image """
         logger.trace("Randomly warping image")
@@ -309,6 +318,7 @@ class ImageManipulation():
         logger.trace("Randomly warped image and mask")
         return [warped_image, target_image, target_mask]
 
+    @timeit.timeit()
     def random_warp_landmarks(self, image, src_points=None, dst_points=None):
         """ get warped image, target image and target mask
             From DFAKER plugin """
