@@ -33,7 +33,7 @@ from lib.training_data import TrainingDataGenerator, stack_images
 from lib.utils import get_folder, get_image_paths
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
-
+from MyTimeit import timeit
 
 class TrainerBase():
     """ Base Trainer """
@@ -148,6 +148,9 @@ class TrainerBase():
             self.store_history(side, side_loss)
             self.log_tensorboard(side, side_loss)
         self.print_loss(loss)
+        
+        if self.model.state.current_session["iterations"] % 50 == 0:
+            timeit.print_summary()
 
         if viewer is not None:
             viewer(self.samples.show_sample(),
@@ -180,7 +183,6 @@ class TrainerBase():
             logger.debug("Ending Tensorboard. Side: '%s'", side)
             tensorboard.on_train_end(None)
 
-
 class Batcher():
     """ Batch images from a single side """
     def __init__(self, side, images, model, use_mask, batch_size):
@@ -207,12 +209,15 @@ class Batcher():
 
     def train_one_batch(self, is_preview_iteration):
         """ Train a batch """
-        logger.trace("Training one step: (side: %s)", self.side)
-        batch = self.get_next(is_preview_iteration)
-        loss = self.model.predictors[self.side].train_on_batch(*batch)
-        loss = loss if isinstance(loss, list) else [loss]
-        return loss
+        with timeit.log("Batcher(%s)->train_one_batch" % self.side):
+            logger.trace("Training one step: (side: %s)", self.side)
+            batch = self.get_next(is_preview_iteration)
+            with timeit.log("train_on_batch"):
+                loss = self.model.predictors[self.side].train_on_batch(*batch)
+            loss = loss if isinstance(loss, list) else [loss]
+            return loss
 
+    @timeit.timeit("Batcher.get_next")
     def get_next(self, is_preview_iteration):
         """ Return the next batch from the generator
             Items should come out as: (warped, target [, mask]) """
