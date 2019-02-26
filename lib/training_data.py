@@ -15,6 +15,8 @@ from lib.multithreading import MultiThread
 from lib.queue_manager import queue_manager
 from lib.umeyama import umeyama
 from lib.utils import SimpleCache
+from collections import OrderedDict
+import itertools
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 from MyTimeit import timeit
@@ -32,7 +34,9 @@ class TrainingDataGenerator():
         self.training_opts = training_opts
         self.mask_function = self.set_mask_function()
         self.landmarks = self.training_opts.get("landmarks", None)
-
+        if self.landmarks:
+            for side in self.landmarks:
+                self.landmarks[side] = OrderedDict(self.landmarks[side])
         self.processing = ImageManipulation(model_input_size,
                                             model_output_size,
                                             training_opts.get("coverage_ratio", 0.625))
@@ -40,6 +44,8 @@ class TrainingDataGenerator():
         # Cache img hashes by filename and side
         self._img_hash_from_file = lambda f, s, img: sha1(img).hexdigest()
         self._img_hash_from_file = SimpleCache(self._img_hash_from_file, ('f','s'))
+        # Cache the ids of the 10 nearest images for each face
+        self._get_closest_match_index = SimpleCache(self._get_closest_match_index, ('filename', 'side'))
         
         logger.debug("Initialized %s", self.__class__.__name__)
 
@@ -178,15 +184,19 @@ class TrainingDataGenerator():
         logger.trace("Returning: (src_points: %s)", src_points)
         return src_points
 
+    def _get_closest_match_index(self, filename, side, src_points):
+        dst_points = self.landmarks["a"] if side == "b" else self.landmarks["b"]
+        dst_points = list(dst_points.values())
+        closest = (np.mean(np.square(src_points - dst_points),
+                           axis=(1, 2))).argsort()[:10]
+        return closest, dst_points
+
     @timeit.timeit()
     def get_closest_match(self, filename, side, src_points):
         """ Return closest matched landmarks from opposite set """
         logger.trace("Retrieving closest matched landmarks: (filename: '%s', src_points: '%s'",
                      filename, src_points)
-        dst_points = self.landmarks["a"] if side == "b" else self.landmarks["b"]
-        dst_points = list(dst_points.values())
-        closest = (np.mean(np.square(src_points - dst_points),
-                           axis=(1, 2))).argsort()[:10]
+        closest, dst_points = self._get_closest_match_index(filename, side, src_points)
         closest = np.random.choice(closest)
         dst_points = dst_points[closest]
         logger.trace("Returning: (dst_points: %s)", dst_points)
