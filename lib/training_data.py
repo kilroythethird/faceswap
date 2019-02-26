@@ -17,7 +17,7 @@ from lib.umeyama import umeyama
 from lib.utils import SimpleCache
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
-from MyTimeit import timeit
+from MyTimeit import timeit, TimeIt
 
 class TrainingDataGenerator():
     """ Generate training data for models """
@@ -33,17 +33,9 @@ class TrainingDataGenerator():
         self.training_opts = training_opts
         self.mask_function = self.set_mask_function()
         self.landmarks = self.training_opts.get("landmarks", None)
-        
-
-
         self.processing = ImageManipulation(model_input_size,
                                             model_output_size,
-                                            training_opts.get("coverage_ratio", 0.625))
-        
-        # Cache img hashes by filename and side
-        self._img_hash_from_file = lambda f, s, img: sha1(img).hexdigest()
-        self._img_hash_from_file = SimpleCache(self._img_hash_from_file, ('f','s'))
-        
+                                            training_opts.get("coverage_ratio", 0.625))        
         logger.debug("Initialized %s", self.__class__.__name__)
 
     def set_mask_function(self):
@@ -51,12 +43,7 @@ class TrainingDataGenerator():
         mask_type = self.training_opts.get("mask_type", None)
         if mask_type:
             logger.debug("Mask type: '%s'", mask_type)
-            raw_func = getattr(masks, mask_type)
-            # Cache masks by filename and side but only cache mask itself
-            cached_mask_func = lambda fn,s,l,f,channels: raw_func(l, f, 1)
-            cached_mask_func = SimpleCache(cached_mask_func, ('fn', 's'), name="mask_func")
-            mask_func = lambda fn,s,l,f,channels: masks.merge_mask(f, cached_mask_func(fn, s, l, f, 1), channels)
-            
+            mask_func = getattr(masks, mask_type)            
         else:
             mask_func = None
         logger.debug("Mask function: %s", mask_func)
@@ -112,6 +99,7 @@ class TrainingDataGenerator():
                     memory[j][i][:] = img
                 epoch += 1
             memory_wrapper.ready()
+        timeit.print_summary()
         logger.debug("Finished batching: (epoch: %s, q_name: '%s', side: '%s')",
                      epoch, q_name, side)            
 
@@ -152,7 +140,7 @@ class TrainingDataGenerator():
                 src_pts = self.get_landmarks(filename, image, side)
             if self.mask_function:
                 with timeit.log("mask_function"):
-                    image = self.mask_function(filename, side, src_pts, image, channels=4)
+                    image = self.mask_function(src_pts, image, channels=4)
     
             image = self.processing.color_adjust(image)
     
@@ -178,7 +166,7 @@ class TrainingDataGenerator():
         """ Return the landmarks for this face """
         logger.trace("Retrieving landmarks: (filename: '%s', side: '%s'", filename, side)
         with timeit.log("sha1(image)"):
-            lm_key = self._img_hash_from_file(filename, side, image)
+            lm_key = sha1(image).hexdigest()
         try:
             src_points = self.landmarks[side][lm_key]
         except KeyError:
