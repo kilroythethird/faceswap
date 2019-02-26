@@ -19,7 +19,6 @@ from lib.logger import get_loglevel
 import sys
 import inspect
 
-
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
 # Global variables
@@ -258,13 +257,13 @@ class SimpleCache(object):
     
     def __call__(self, *args, **kwargs):
         key = self.get_cache_key(args, kwargs)
-        logger.trace("CACHE lookup for %s(%s)" % (self.name, key))
+        logger.trace("CACHE lookup for %s(%s)", self.name, key)
         ret = self._cache.get(key)
         if not ret is None:
-            logger.trace("CACHE HIT for %s(%s)" % (self.name, key))
+            logger.trace("CACHE HIT for %s(%s)", self.name, key)
             return ret
         ret = self._function(*args, **kwargs)
-        logger.trace("CACHE MISS for %s(%s)" % (self.name, key))
+        logger.trace("CACHE MISS for %s(%s)", self.name, key)
         self._cache[key] = ret
         return ret
 
@@ -272,9 +271,11 @@ class SimpleCache(object):
         return sum(sys.getsizeof(x) for x in self._cache.values())
 
 # Wont work for subprocesses
-def _debug_dump_estimated_cache_size():
+def _debug_dump_estimated_cache_size(dumper=None):
+    if dumper is None:
+        dumper = logger.debug
     for cache in _used_caches:
-        logger.debug("%s uses %.2f mb" % (cache.name, cache.estimate_cache_size() / 1024. / 1024. ))
+        dumper("%s uses %.2f mb with %i items" % (cache.name, cache.estimate_cache_size() / 1024. / 1024., len(cache._cache)))
 
 
 def safe_shutdown():
