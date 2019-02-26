@@ -16,6 +16,8 @@ import dlib
 
 from lib.faces_detect import DetectedFace
 from lib.logger import get_loglevel
+import sys
+import inspect
 
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
@@ -198,6 +200,81 @@ def camel_case_split(identifier):
         ".+?(?:(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|$)",
         identifier)
     return [m.group(0) for m in matches]
+
+_used_caches = []
+class SimpleCache(object):
+    """
+    Simple cache implementation with unlimited size.
+    Needs py3
+    TODO: add decorator helper function
+    TODO: doesn't currently work with keys being in *args and **kwargs
+    """
+    def __init__(self, function, cache_keys, name=None):
+        self._function = function
+        self._cache = dict()
+        if not hasattr(cache_keys, '__iter__'):
+            cache_keys = [cache_keys]
+        self._signature = inspect.signature(self._function)
+        self._func_params = self._signature.parameters
+        self._func_params_i = dict((v.name, i) for i,v in enumerate(self._func_params.values()))
+        self._set_cache_keys(cache_keys)
+        self.name = name if name else getattr(function, '__name__', str(function))
+        _used_caches.append(self)
+        logger.debug("CACHE created for %s with keys %s" % (self.name, self._cache_keys))
+    
+    def _set_cache_keys(self, cache_keys):
+        ps = dict()
+        params_i = tuple(self._func_params.values())
+        for key in cache_keys:
+            if isinstance(key, int):
+                param = params_i[key]
+            elif key in self._func_params:
+                param = self._func_params[key]
+            else:
+                raise Exception("Function %s has no parameter %s" % (self._function, key))
+            ps[param.name] = param
+        self._cache_keys = tuple(ps.values())
+    
+    def get_cache_key(self, args, kwargs):
+        values = []
+        for param in self._cache_keys:
+            key = param.name
+            i = self._func_params_i[key]
+            if key in kwargs:
+                values.append(kwargs[key])
+            elif len(args) >= i + 1:
+                values.append(args[i])
+            elif param.default is not inspect._empty:
+                values.append(param.default)
+            else:
+                raise ValueError("Missing parameter %s" % key)
+        return tuple(values)
+    
+    def clear(self):
+        self._cache.clear()
+        
+    def remove_key(self, *args, **kwargs):
+        return self._cache.pop(self.get_cache_key(args, kwargs))
+    
+    def __call__(self, *args, **kwargs):
+        key = self.get_cache_key(args, kwargs)
+        logger.trace("CACHE lookup for %s(%s)" % (self.name, key))
+        ret = self._cache.get(key)
+        if not ret is None:
+            logger.trace("CACHE HIT for %s(%s)" % (self.name, key))
+            return ret
+        ret = self._function(*args, **kwargs)
+        logger.trace("CACHE MISS for %s(%s)" % (self.name, key))
+        self._cache[key] = ret
+        return ret
+
+    def estimate_cache_size(self):
+        return sum(sys.getsizeof(x) for x in self._cache.values())
+
+# Wont work for subprocesses
+def _debug_dump_estimated_cache_size():
+    for cache in _used_caches:
+        logger.debug("%s uses %.2f mb" % (cache.name, cache.estimate_cache_size() / 1024. / 1024. ))
 
 
 def safe_shutdown():

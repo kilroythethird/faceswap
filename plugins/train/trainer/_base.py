@@ -151,6 +151,8 @@ class TrainerBase():
         
         if self.model.state.current_session["iterations"] % 50 == 0:
             timeit.print_summary()
+            from lib.utils import _debug_dump_estimated_cache_size
+            _debug_dump_estimated_cache_size()
 
         if viewer is not None:
             viewer(self.samples.show_sample(),
