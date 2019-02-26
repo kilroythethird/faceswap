@@ -14,6 +14,7 @@ from lib.model import masks
 from lib.multithreading import MultiThread, FixedProducerDispatcher
 from lib.queue_manager import queue_manager
 from lib.umeyama import umeyama
+from lib.utils import SimpleCache
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 from MyTimeit import timeit
@@ -38,6 +39,11 @@ class TrainingDataGenerator():
         self.processing = ImageManipulation(model_input_size,
                                             model_output_size,
                                             training_opts.get("coverage_ratio", 0.625))
+        
+        # Cache img hashes by filename and side
+        self._img_hash_from_file = lambda f, s, img: sha1(img).hexdigest()
+        self._img_hash_from_file = SimpleCache(self._img_hash_from_file, ('f','s'))
+        
         logger.debug("Initialized %s", self.__class__.__name__)
 
     def set_mask_function(self):
@@ -45,7 +51,12 @@ class TrainingDataGenerator():
         mask_type = self.training_opts.get("mask_type", None)
         if mask_type:
             logger.debug("Mask type: '%s'", mask_type)
-            mask_func = getattr(masks, mask_type)
+            raw_func = getattr(masks, mask_type)
+            # Cache masks by filename and side but only cache mask itself
+            cached_mask_func = lambda fn,s,l,f,channels: raw_func(l, f, 1)
+            cached_mask_func = SimpleCache(cached_mask_func, ('fn', 's'), name="mask_func")
+            mask_func = lambda fn,s,l,f,channels: masks.merge_mask(f, cached_mask_func(fn, s, l, f, 1), channels)
+            
         else:
             mask_func = None
         logger.debug("Mask function: %s", mask_func)
@@ -141,7 +152,7 @@ class TrainingDataGenerator():
                 src_pts = self.get_landmarks(filename, image, side)
             if self.mask_function:
                 with timeit.log("mask_function"):
-                    image = self.mask_function(src_pts, image, channels=4)
+                    image = self.mask_function(filename, side, src_pts, image, channels=4)
     
             image = self.processing.color_adjust(image)
     
@@ -167,7 +178,7 @@ class TrainingDataGenerator():
         """ Return the landmarks for this face """
         logger.trace("Retrieving landmarks: (filename: '%s', side: '%s'", filename, side)
         with timeit.log("sha1(image)"):
-            lm_key = sha1(image).hexdigest()
+            lm_key = self._img_hash_from_file(filename, side, image)
         try:
             src_points = self.landmarks[side][lm_key]
         except KeyError:
@@ -275,22 +286,23 @@ class ImageManipulation():
     def random_warp(self, image):
         """ get pair of random warped images from aligned face image """
         logger.trace("Randomly warping image")
-        height, width = image.shape[0:2]
-        coverage = self.get_coverage(image)
-        assert height == width and height % 2 == 0
-
-        range_ = np.linspace(height // 2 - coverage // 2,
-                             height // 2 + coverage // 2,
-                             5, dtype='float32')
-        mapx = np.broadcast_to(range_, (5, 5)).copy()
-        mapy = mapx.T
-        # mapx, mapy = np.float32(np.meshgrid(range_,range_)) # instead of broadcast
-
-        pad = int(1.25 * self.input_size)
-        slices = slice(pad // 10, -pad // 10)
-        dst_slice = slice(0, (self.output_size + 1), (self.output_size // 4))
-        interp = np.empty((2, self.input_size, self.input_size), dtype='float32')
-        ####
+        with timeit.log("Non random part"):
+            height, width = image.shape[0:2]
+            coverage = self.get_coverage(image)
+            assert height == width and height % 2 == 0
+    
+            range_ = np.linspace(height // 2 - coverage // 2,
+                                 height // 2 + coverage // 2,
+                                 5, dtype='float32')
+            mapx = np.broadcast_to(range_, (5, 5)).copy()
+            mapy = mapx.T
+            # mapx, mapy = np.float32(np.meshgrid(range_,range_)) # instead of broadcast
+    
+            pad = int(1.25 * self.input_size)
+            slices = slice(pad // 10, -pad // 10)
+            dst_slice = slice(0, (self.output_size + 1), (self.output_size // 4))
+            interp = np.empty((2, self.input_size, self.input_size), dtype='float32')
+            ####
 
         for i, map_ in enumerate([mapx, mapy]):
             map_ = map_ + np.random.normal(size=(5, 5), scale=self.scale)
