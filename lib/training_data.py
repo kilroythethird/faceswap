@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """ Process training data for model training """
-import multiprocessing
 import logging
 
 from hashlib import sha1
@@ -16,7 +15,6 @@ from lib.queue_manager import queue_manager
 from lib.umeyama import umeyama
 from lib.utils import SimpleCache
 from collections import OrderedDict
-import itertools
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 from MyTimeit import timeit
@@ -41,13 +39,6 @@ class TrainingDataGenerator():
         self.processing = ImageManipulation(model_input_size,
                                             model_output_size,
                                             training_opts.get("coverage_ratio", 0.625))
-        
-        # Cache img hashes by filename and side
-        self._img_hash_from_file = lambda f, s, img: sha1(img).hexdigest()
-        self._img_hash_from_file = SimpleCache(self._img_hash_from_file, ('f','s'))
-        # Cache the ids of the 10 nearest images for each face
-        self._get_closest_match_index = SimpleCache(self._get_closest_match_index, ('filename', 'side'))
-        print("SPAWN: ", multiprocessing.get_start_method())
         logger.debug("Initialized %s", self.__class__.__name__)
 
     def set_mask_function(self):
@@ -55,12 +46,7 @@ class TrainingDataGenerator():
         mask_type = self.training_opts.get("mask_type", None)
         if mask_type:
             logger.debug("Mask type: '%s'", mask_type)
-            raw_func = getattr(masks, mask_type)
-            # Cache masks by filename and side but only cache mask itself
-            cached_mask_func = lambda fn,s,l,f,channels: raw_func(l, f, 1)
-            cached_mask_func = SimpleCache(cached_mask_func, ('fn', 's'), name="mask_func")
-            mask_func = lambda fn,s,l,f,channels: masks.merge_mask(f, cached_mask_func(fn, s, l, f, 1), channels)
-            
+            mask_func = getattr(masks, mask_type)          
         else:
             mask_func = None
         logger.debug("Mask function: %s", mask_func)
@@ -102,8 +88,20 @@ class TrainingDataGenerator():
         logger.debug("Loading batch: (image_count: %s, q_name: '%s', side: '%s', "
                      "is_timelapse: %s, do_shuffle: %s)",
                      len(images), q_name, side, is_timelapse, do_shuffle)
+                
+        # Cache img hashes by filename and side
+        self._img_hash_from_file = lambda f, s, img: sha1(img).hexdigest()
+        self._img_hash_from_file = SimpleCache(self._img_hash_from_file, ('f','s'), "img_hash_from_file")
+        # Cache the ids of the 10 nearest images for each face
+        self._get_closest_match_index = SimpleCache(self._get_closest_match_index, ('filename', 'side'))
+        # Cache masks by filename and side but only cache mask itself
+        if self.mask_function:
+            raw_func = self.mask_function
+            cached_mask_func = lambda fn,s,l,f,channels: raw_func(l, f, 1)
+            cached_mask_func = SimpleCache(cached_mask_func, ('fn', 's'), name="mask_func")
+            self.mask_function = lambda fn,s,l,f,channels: masks.merge_mask(f, cached_mask_func(fn, s, l, f, 1), channels)
+        
         self.validate_samples(images)
-        print("SPAWN: MP", multiprocessing.get_start_method())
         epoch = 0
         for memory_wrapper in mem_gen:
             memory = memory_wrapper.get()

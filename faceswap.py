@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
 """ The master faceswap.py script """
-if __name__ == '__main__':
-    import multiprocessing
-    multiprocessing.set_start_method("spawn")
-
 import sys
 
 import lib.cli as cli
