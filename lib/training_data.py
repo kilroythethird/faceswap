@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """ Process training data for model training """
-
+import multiprocessing
 import logging
 
 from hashlib import sha1
@@ -47,7 +47,7 @@ class TrainingDataGenerator():
         self._img_hash_from_file = SimpleCache(self._img_hash_from_file, ('f','s'))
         # Cache the ids of the 10 nearest images for each face
         self._get_closest_match_index = SimpleCache(self._get_closest_match_index, ('filename', 'side'))
-        
+        print("SPAWN: ", multiprocessing.get_start_method())
         logger.debug("Initialized %s", self.__class__.__name__)
 
     def set_mask_function(self):
@@ -103,6 +103,7 @@ class TrainingDataGenerator():
                      "is_timelapse: %s, do_shuffle: %s)",
                      len(images), q_name, side, is_timelapse, do_shuffle)
         self.validate_samples(images)
+        print("SPAWN: MP", multiprocessing.get_start_method())
         epoch = 0
         for memory_wrapper in mem_gen:
             memory = memory_wrapper.get()
