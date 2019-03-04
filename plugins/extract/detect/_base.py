@@ -15,7 +15,6 @@ import logging
 import os
 import traceback
 from io import StringIO
-from math import sqrt
 
 import cv2
 import dlib
@@ -34,12 +33,14 @@ def get_config(plugin_name):
 
 class Detector():
     """ Detector object """
-    def __init__(self, loglevel, rotation=None):
-        logger.debug("Initializing %s: (rotation: %s)", self.__class__.__name__, rotation)
+    def __init__(self, loglevel, rotation=None, min_size=0):
+        logger.debug("Initializing %s: (rotation: %s, min_size: %s)",
+                     self.__class__.__name__, rotation, min_size)
         self.config = get_config(".".join(self.__module__.split(".")[-2:]))
         self.loglevel = loglevel
         self.cachepath = os.path.join(os.path.dirname(__file__), ".cache")
         self.rotation = self.get_rotation_angles(rotation)
+        self.min_size = min_size
         self.parent_is_pool = False
         self.init = None
 
@@ -78,9 +79,6 @@ class Detector():
         """ Inititalize the detector
             Tasks to be run before any detection is performed.
             Override for specific detector """
-        logger_init = kwargs["log_init"]
-        log_queue = kwargs["log_queue"]
-        logger_init(self.loglevel, log_queue)
         logger.debug("initialize %s (PID: %s, args: %s, kwargs: %s)",
                      self.__class__.__name__, os.getpid(), args, kwargs)
         self.init = kwargs.get("event", False)
@@ -127,9 +125,24 @@ class Detector():
             logger.trace("Item out: %s", {key: val
                                           for key, val in output.items()
                                           if key != "image"})
+            if self.min_size > 0 and output.get("detected_faces", None):
+                output["detected_faces"] = self.filter_small_faces(output["detected_faces"])
         else:
             logger.trace("Item out: %s", output)
         self.queues["out"].put(output)
+
+    def filter_small_faces(self, detected_faces):
+        """ Filter out any faces smaller than the min size threshold """
+        retval = list()
+        for face in detected_faces:
+            face_size = ((face.right() - face.left()) ** 2 +
+                         (face.bottom() - face.top()) ** 2) ** 0.5
+            if face_size < self.min_size:
+                logger.debug("Removing detected face: (face_size: %s, min_size: %s",
+                             face_size, self.min_size)
+                continue
+            retval.append(face)
+        return retval
 
     # <<< DETECTION IMAGE COMPILATION METHODS >>> #
     def compile_detection_image(self, image, is_square, scale_up):
@@ -147,13 +160,13 @@ class Detector():
             source = max(height, width)
             target = max(self.target)
         else:
+            source = (width * height) ** 0.5
             if isinstance(self.target, tuple):
                 self.target = self.target[0] * self.target[1]
-            source = width * height
-            target = self.target
+            target = self.target ** 0.5
 
         if scale_up or target < source:
-            scale = sqrt(target / source)
+            scale = target / source
         else:
             scale = 1.0
         logger.trace("Detector scale: %s", scale)

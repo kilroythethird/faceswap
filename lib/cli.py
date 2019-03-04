@@ -27,6 +27,7 @@ class ScriptExecutor():
 
     def import_script(self):
         """ Only import a script's modules when running that script."""
+        self.test_for_tf_version()
         self.test_for_gui()
         cmd = os.path.basename(sys.argv[0])
         src = "tools" if cmd == "tools.py" else "scripts"
@@ -34,6 +35,22 @@ class ScriptExecutor():
         module = import_module(mod)
         script = getattr(module, self.command.title())
         return script
+
+    @staticmethod
+    def test_for_tf_version():
+        """ Check that the minimum required Tensorflow version is installed """
+        min_ver = 1.12
+        try:
+            import tensorflow as tf
+        except ImportError:
+            logger.error("Tensorflow is a requirement but is not installed on your system.")
+            exit(1)
+        tf_ver = float(".".join(tf.__version__.split(".")[:2]))
+        if tf_ver < min_ver:
+            logger.error("The minimum supported Tensorflow is version %s but you have version "
+                         "%s installed. Please upgrade Tensorflow.", min_ver, tf_ver)
+            exit(1)
+        logger.debug("Installed Tensorflow Version: %s", tf_ver)
 
     def test_for_gui(self):
         """ If running the gui, check the prerequisites """
@@ -302,7 +319,7 @@ class FaceSwapArgs():
                                     "file an error report. Be careful with TRACE as it will "
                                     "generate a lot of data"})
         global_args.append({"opts": ("-LF", "--logfile"),
-                            "action": FileFullPaths,
+                            "action": SaveFileFullPaths,
                             "filetypes": 'log',
                             "type": str,
                             "dest": "logfile",
@@ -449,7 +466,7 @@ class ExtractArgs(ExtractConvertArgs):
                     "\n'dlib': Dlib Pose Predictor. Faster, less "
                     "\n\tresource intensive, but less accurate."
                     "\n'fan': Face Alignment Network. Best aligner."
-                    "\n\tGPU heavy."})
+                    "\n\tGPU heavy, slow when not running on GPU"})
         argument_list.append({"opts": ("-r", "--rotate-images"),
                               "type": str,
                               "dest": "rotate_images",
@@ -490,6 +507,16 @@ class ExtractArgs(ExtractConvertArgs):
                               "help": "The output size of extracted faces. Make sure that the "
                                       "model you intend to train supports your required size. "
                                       "This will only need to be changed for hi-res models."})
+        argument_list.append({"opts": ("-min", "--min-size"),
+                              "type": int,
+                              "action": Slider,
+                              "dest": "min_size",
+                              "min_max": (0, 1080),
+                              "default": 0,
+                              "rounding": 20,
+                              "help": "Filters out faces detected below this size. Length, in "
+                                      "pixels across the diagonal of the bounding box. Set to 0 "
+                                      "for off"})
         argument_list.append({"opts": ("-s", "--skip-existing"),
                               "action": "store_true",
                               "dest": "skip_existing",
@@ -581,7 +608,7 @@ class ConvertArgs(ExtractConvertArgs):
                         "dfl",
                         #  "cnn",  Removed until implemented
                         "none"],
-            "default": "facehull_rect",
+            "default": "facehull",
             "help": "R|Mask to use to replace faces."
                     "\nellipse: Oval around face."
                     "\nfacehull: Face cutout based on landmarks."
