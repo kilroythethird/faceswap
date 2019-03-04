@@ -245,15 +245,9 @@ class Extract():
 
 class Plugins():
     """ Detector and Aligner Plugins and queues """
-    def __init__(self, arguments, converter_args=None):
+    def __init__(self, arguments):
         logger.debug("Initializing %s", self.__class__.__name__)
         self.args = arguments
-        self.converter_args = converter_args  # Arguments from converter for on the fly extract
-        if converter_args is not None:
-            self.loglevel = converter_args["loglevel"]
-        else:
-            self.loglevel = self.args.loglevel
-
         self.detector = self.load_detector()
         self.aligner = self.load_aligner()
         self.is_parallel = self.set_parallel_processing()
@@ -303,34 +297,26 @@ class Plugins():
 
     def load_detector(self):
         """ Set global arguments and load detector plugin """
-        if not self.converter_args:
-            detector_name = self.args.detector.replace("-", "_").lower()
-        else:
-            detector_name = self.converter_args["detector"]
+        detector_name = self.args.detector.replace("-", "_").lower()
         logger.debug("Loading Detector: '%s'", detector_name)
         # Rotation
-        rotation = self.args.rotate_images if hasattr(self.args, "rotate_images") else None
-        # Min acceptable face size:
-        min_size = self.args.min_size if hasattr(self.args, "min_size") else 0
+        rotation = None
+        if hasattr(self.args, "rotate_images"):
+            rotation = self.args.rotate_images
 
         detector = PluginLoader.get_detector(detector_name)(
-            loglevel=self.loglevel,
-            rotation=rotation,
-            min_size=min_size)
+            loglevel=self.args.loglevel,
+            rotation=rotation)
 
         return detector
 
     def load_aligner(self):
         """ Set global arguments and load aligner plugin """
-        if not self.converter_args:
-            aligner_name = self.args.aligner.replace("-", "_").lower()
-        else:
-            aligner_name = self.converter_args["aligner"]
-
+        aligner_name = self.args.aligner.replace("-", "_").lower()
         logger.debug("Loading Aligner: '%s'", aligner_name)
 
         aligner = PluginLoader.get_aligner(aligner_name)(
-            loglevel=self.loglevel)
+            loglevel=self.args.loglevel)
 
         return aligner
 
@@ -365,8 +351,7 @@ class Plugins():
         out_queue = queue_manager.get_queue("detect")
         kwargs = {"in_queue": queue_manager.get_queue("load"),
                   "out_queue": out_queue}
-        if self.converter_args:
-            kwargs["processes"] = 1
+
         mp_func = PoolProcess if self.detector.parent_is_pool else SpawnProcess
         self.process_detect = mp_func(self.detector.run, **kwargs)
 
