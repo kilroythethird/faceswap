@@ -95,9 +95,6 @@ class ProcessWrapper():
                 self.init_training_session(cliopt)
         if not generate:
             args.append("-gui")  # Indicate to Faceswap that we are running the GUI
-        if generate:
-            # Delimit args with spaces
-            args = ['"{}"'.format(arg) if " " in arg else arg for arg in args]
         logger.debug("Built cli arguments: (%s)", args)
         return args
 

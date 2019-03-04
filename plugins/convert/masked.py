@@ -43,8 +43,18 @@ class Convert():
         detected_face.load_aligned(image, size=self.training_size, align_eyes=False)
         new_image = self.get_new_image(image, detected_face, coverage, image_size)
         image_mask = self.get_image_mask(detected_face, image_size)
-        patched_face = self.apply_fixes(image, new_image, image_mask,
-                                        image_size, detected_face.landmarks_as_xy)
+
+        if self.args.draw_transparent:
+            new_image = dfl_full(detected_face.landmarks_as_xy, new_image, channels=4 )#Add mask as 4th channel for saving as alpha on supported output formats
+
+            #This make sure that all the arrays match in size for later actions despite not actually using alpha in any way.
+            image_mask = cv2.cvtColor(image_mask, cv2.COLOR_RGB2RGBA)
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2RGBA)
+
+        patched_face = self.apply_fixes(image,
+                                        new_image,
+                                        image_mask,
+                                        image_size)
 
         logger.trace("Patched image")
         return patched_face
@@ -52,7 +62,7 @@ class Convert():
     def get_new_image(self, image, detected_face, coverage, image_size):
         """ Get the new face from the predictor """
         logger.trace("coverage: %s", coverage)
-        src_face = detected_face.aligned_face[:,:,:3]
+        src_face = detected_face.aligned_face
         coverage_face = src_face[self.crop, self.crop]
         old_face = coverage_face.copy()
         coverage_face = cv2.resize(coverage_face,  # pylint: disable=no-member
@@ -145,12 +155,9 @@ class Convert():
         logger.trace("blur_size: %s", blur_size)
         return blur_size
 
-    def apply_fixes(self, original, face, mask, image_size, landmarks):
+    def apply_fixes(self, frame, new_image, image_mask, image_size):
         """ Apply fixes """
-        
-        new_image =  face[:,:,:3].copy()
-        image_mask = mask[:,:,:3].copy()
-        frame =  original[:,:,:3].copy()
+
         if self.args.sharpen_image is not None and self.args.sharpen_image.lower() != "none":
             np.clip(new_image, 0.0, 255.0, out=new_image)
             if self.args.sharpen_image == "box_filter":
@@ -178,7 +185,7 @@ class Convert():
             np.clip(new_image, 0.0, 255.0, out=new_image)
             new_image = self.color_hist_match(new_image, frame, image_mask)
 
-        if self.args.seamless_clone:
+        if self.args.seamless_clone and not self.args.draw_transparent:
             h, w, _ = frame.shape
             h = h // 2
             w = w // 2
@@ -213,11 +220,8 @@ class Convert():
             foreground = new_image * image_mask
             background = frame * (1.0 - image_mask)
             blended = foreground + background
+
         np.clip(blended, 0.0, 255.0, out=blended)
-        if self.args.draw_transparent:
-            # Adding a 4th channel should happen after all other channel operations
-            # Add mask as 4th channel for saving as alpha on supported output formats
-            blended = dfl_full(landmarks, blended, channels=4 )
 
         return np.rint(blended).astype('uint8')
 
