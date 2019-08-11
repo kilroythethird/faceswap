@@ -23,7 +23,7 @@ from plugins.extract.pipeline import Extractor
 from plugins.plugin_loader import PluginLoader
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
-
+from lib.MyTimeit import timeit
 
 class Convert():
     """ The convert process. """
@@ -526,8 +526,10 @@ class Predict():
         faces_seen = 0
         consecutive_no_faces = 0
         batch = list()
+        count = 0
         while True:
-            item = self.in_queue.get()
+            with timeit.log("predict.in_queue.get"):
+                item = self.in_queue.get()
             if item != "EOF":
                 logger.trace("Got from queue: '%s'", item["filename"])
                 faces_count = len(item["detected_faces"])
@@ -543,7 +545,8 @@ class Predict():
                     logger.verbose("Found more than one face in an image! '%s'",
                                    os.path.basename(item["filename"]))
 
-                self.load_aligned(item)
+                with timeit.log("predict.load_aligned"):
+                    self.load_aligned(item)
 
                 faces_seen += faces_count
                 batch.append(item)
@@ -560,12 +563,22 @@ class Predict():
                 detected_batch = [detected_face for item in batch
                                   for detected_face in item["detected_faces"]]
                 if faces_seen != 0:
-                    feed_faces = self.compile_feed_faces(detected_batch)
-                    predicted = self.predict(feed_faces)
+                    with timeit.log("predict.compile_feed_faces"):
+                        feed_faces = self.compile_feed_faces(detected_batch)
+                    batch_size = None
+                    if feed_faces.shape[0] != self.batchsize:
+                        logger.info("Fallback to BS=1")
+                        batch_size = 1
+                    with timeit.log("predict.predict"):
+                        predicted = self.predict(feed_faces, batch_size=batch_size)
                 else:
                     predicted = list()
+                with timeit.log("predict.queue_out_frames"):
+                    self.queue_out_frames(batch, predicted)
 
-                self.queue_out_frames(batch, predicted)
+            count += 1
+            if count % 10 == 0:
+                timeit.print_summary()
 
             consecutive_no_faces = 0
             faces_seen = 0
@@ -602,7 +615,7 @@ class Predict():
         logger.trace("Compiled Feed faces. Shape: %s", feed_faces.shape)
         return feed_faces
 
-    def predict(self, feed_faces):
+    def predict(self, feed_faces, batch_size=None):
         """ Perform inference on the feed """
         logger.trace("Predicting: Batchsize: %s", len(feed_faces))
         feed = [feed_faces]
@@ -610,7 +623,7 @@ class Predict():
             feed.append(np.repeat(self.input_mask, feed_faces.shape[0], axis=0))
         logger.trace("Input shape(s): %s", [item.shape for item in feed])
 
-        predicted = self.predictor(feed)
+        predicted = self.predictor(feed, batch_size=batch_size)
         predicted = predicted if isinstance(predicted, list) else [predicted]
         logger.trace("Output shape(s): %s", [predict.shape for predict in predicted])
 
