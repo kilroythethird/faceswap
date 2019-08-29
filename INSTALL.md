@@ -1,4 +1,4 @@
-# Installing faceswap
+# Installing faceswap dummy
 - [Installing faceswap](#Installing-faceswap)
 - [Prerequisites](#Prerequisites)
   - [Hardware Requirements](#Hardware-Requirements)
