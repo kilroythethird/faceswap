@@ -9,6 +9,7 @@ env:
 
 os:
   - linux
+
   # - windows
   # - osx
 
@@ -87,5 +88,7 @@ install:
   - python setup.py --installer;
 
 script:
+  # For debugging purposes
+  - df -h
   - python simple_tests.py;
 
