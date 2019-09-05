@@ -35,6 +35,7 @@ class Detect(Detector):
         self.kwargs = self.validate_kwargs()
         self.name = "mtcnn"
         self.target = 2073600  # Uses approx 1.30 GB of VRAM
+        self.target = (self.target ** 0.5, self.target ** 0.5)
         self.vram = 1408
 
     def validate_kwargs(self):

@@ -69,7 +69,8 @@ class PluginLoader():
                 extractors.remove(extractor)
         else:
             for extractor in multi_versions:
-                extractors.remove("{}-amd".format(extractor))
+                pass
+                #extractors.remove("{}-amd".format(extractor))
         return extractors
 
     @staticmethod

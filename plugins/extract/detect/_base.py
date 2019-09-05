@@ -19,10 +19,15 @@ import traceback
 from io import StringIO
 
 import cv2
+import numpy as np
 
 from lib.gpu_stats import GPUStats
 from lib.utils import rotate_landmarks, GetModel
 from plugins.extract._config import Config
+from lib.queue_manager import queue_manager
+from lib.multithreading import FSThread
+import queue
+import threading
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
@@ -72,31 +77,228 @@ class Detector():
         # will support. It is also used for holding the number of threads/
         # processes for parallel processing plugins
         self.batch_size = 1
+        self._threads = list()
+        self.got_input_eof = False
         logger.debug("Initialized _base %s", self.__class__.__name__)
+
+    def detect_and_raise_errors(self):
+        for thread in self._threads:
+            thread.check_and_raise_error()
 
     # <<< OVERRIDE METHODS >>> #
     def initialize(self, *args, **kwargs):
         """ Inititalize the detector
             Tasks to be run before any detection is performed.
             Override for specific detector """
-        logger.debug("initialize %s (PID: %s, args: %s, kwargs: %s)",
+        logger.info("initialize %s (PID: %s, args: %s, kwargs: %s)",
                      self.__class__.__name__, os.getpid(), args, kwargs)
-        self.init = kwargs.get("event", False)
-        self.error = kwargs.get("error", False)
+        self.event = self.init = threading.Event() #kwargs.get("event", False)
+        #self.error = kwargs.get("error", False)
         self.queues["in"] = kwargs["in_queue"]
         self.queues["out"] = kwargs["out_queue"]
+
+        self.queues["predict"] = queue_manager.get_queue("detect_predict", 8, multiprocessing_queue=False)
+        self.queues["post"] = queue_manager.get_queue("detect_post", 8, multiprocessing_queue=False)
+        self.queues["rotate"] = queue_manager.get_queue("detect_rotate", 8, multiprocessing_queue=False)
+        self.create_threads()
+
+    def create_threads(self):
+        self._threads.append(
+            FSThread(target=self.compile_thread, args=(self.queues["predict"],))
+        )
+        self._threads.append(
+            FSThread(target=self.predict_thread, args=(self.queues["predict"], self.queues["post"]))
+        )
+        self._threads.append(
+            FSThread(target=self.postprocess_thread, args=(self.queues["post"], self.queues["rotate"]))
+        )
+        for thread in self._threads:
+            thread.start()
+        logger.info("Started threads")
+
+    def _resize_image(self, img):
+        # TODO: overwrite in impl if required
+        detect_image, scale, pads = self.compile_detection_image(
+            img, is_square=True, pad_to=self.target
+        )
+        return (detect_image, scale, pads)
+
+    def _rotate_image(self, img, angle):
+        # TODO: overwrite in impl if required
+        img, rotmat = self.rotate_image_by_angle(
+            img, angle, *self.target
+        )
+        return (img, rotmat)
+
+    def compile_batch(self, items, np_data):
+        # TODO: overwrite in impl if required
+        return items, np_data
+
+    def compile_thread(self, out_queue):
+        input_shutdown = False
+        from time import time as now
+        while True:
+            logger.info("compile_thread waiting for item")
+            stime = now()
+            got_eof, in_batch = self.get_batch()
+            stime = now() - stime
+            logger.info("compile_thread got item in %.5f seconds", stime)
+            batch = list()
+            np_batch = list()
+            for item in in_batch:
+                detector_opts = item.setdefault("_detect_ops", {})
+                if "scaled_img" not in detector_opts:
+                    detect_image, scale, pads = self._resize_image(item["image"])
+                    detector_opts["scale"] = scale
+                    detector_opts["pads"] = pads
+                    detector_opts["rotations"] = list(self.rotation)
+                    detector_opts["rotmatrix"] = None  # the first "rotation" is always 0
+                    img = detector_opts["scaled_img"] = detect_image
+                else:
+                    angle = detector_opts["rotations"][0]
+                    img, rotmat = self._rotate_image(detector_opts["scaled_img"], angle)
+                    detector_opts["rotmatrix"] = rotmat
+                batch.append(item)
+                np_batch.append(img)
+
+            if batch:
+                batch_data = np.array(np_batch, dtype="float32")
+                batch, np_batch = self.compile_batch(batch, batch_data)
+                out_queue.put((batch, np_batch))
+                batch = []
+                np_batch = []
+
+            if got_eof:
+                logger.debug("S3fd-amd main worker got EOF")
+                out_queue.put("EOF")
+                # Required to prevent hanging when less then BS items are in the
+                # again queue and we won't receive new images.
+                self.batch_size = 1
+                if input_shutdown:
+                    break
+                input_shutdown = True
+
+    def predict_batch(self, np_batch):
+        raise NotImplemented()
+
+    def predict_thread(self, in_queue, out_queue):
+        input_shutdown = False
+        from time import time as now
+        while True:
+            stime = now()
+            batch = in_queue.get()
+            stime = now() - stime
+            logger.info("predict_thread got item in %.5f seconds", stime)
+            if batch == "EOF":
+                if input_shutdown:
+                    break
+                input_shutdown = True
+                out_queue.put(batch)
+                continue
+            items, np_batch = batch
+            predicted = self.predict_batch(np_batch)
+            out_queue.put((items, predicted))
+
+    def postprocess(self, items, predictions):
+        raise NotImplemented()
+
+    def postprocess_thread(self, in_queue, again_queue):
+        # If -r is set we move images without found faces and remaining
+        # rotations to a queue which is "merged" with the intial input queue.
+        # This also means it is possible that we get data after an EOF.
+        # This is handled by counting open rotation jobs and propagating
+        # a second EOF as soon as we are really done through
+        # the preprocsessing thread (detect_faces) and the prediction thread.
+        open_rot_jobs = 0
+        input_shutdown = False
+        from time import time as now
+        while True:
+            stime = now()
+            job = in_queue.get()
+            stime = now() - stime
+            logger.info("postprocess_thread got item in %.5f seconds", stime)
+            if job == "EOF":
+                logger.debug("S3fd-amd post processing got EOF")
+                input_shutdown = True
+            else:
+                items, predictions = job
+                predictions = self.postprocess(items, predictions)
+                for prediction, item in zip(predictions, items):
+                    detect_opts = item["_detect_ops"]
+                    did_rotation = detect_opts["rotations"].pop(0) != 0
+                    detected_faces = self.process_output(prediction, detect_opts)
+                    if detected_faces:
+                        item["detected_faces"] = detected_faces
+                        del item["_detect_ops"]
+                        self.finalize(item)
+                        if did_rotation:
+                            open_rot_jobs -= 1
+                            logger.info("Found face after rotation.")
+                    elif detect_opts["rotations"]:  # we have remaining rotations
+                        logger.info("No face detected, remaining rotations: %s", detect_opts["rotations"])
+                        if not did_rotation:
+                            open_rot_jobs += 1
+                        logger.info("Rotate face %s and try again.", item["filename"])
+                        again_queue.put(item)
+                    else:
+                        logger.info("No face detected for %s.", item["filename"])
+                        open_rot_jobs -= 1
+                        item["detected_faces"] = []
+                        del item["_detect_ops"]
+                        self.finalize(item)
+            if input_shutdown and open_rot_jobs <= 0:
+                logger.debug("Sending second EOF")
+                again_queue.put("EOF")
+                self.finalize("EOF")
+                break
 
     def detect_faces(self, *args, **kwargs):
         """ Detect faces in rgb image
             Override for specific detector
             Must return a list of bounding box dicts (See module docstring)"""
+            # TODO: switch this all so that extract pipeline only starts the threads
+            # and calls raise_thread_exception on this class periodically.
+            # This class.raise_thread_exception the aggregates all exceptions
+            # and shuts everything down if any exception is raised...
         try:
             if not self.init:
                 self.initialize(*args, **kwargs)
+#             while not self.got_input_eof: # TODO:
+#                 self.detect_and_raise_errors()
+#                 import time
+#                 time.sleep(0.1)
+#             for thread in self._threads:
+#                 thread.join()
         except ValueError as err:
             logger.error(err)
             exit(1)
         logger.debug("Detecting Faces (args: %s, kwargs: %s)", args, kwargs)
+
+
+    def process_output(self, faces, opts):
+        """ Compile found faces for output """
+        logger.trace(
+            "Processing Output: (faces: %s, rotation_matrix: %s)",
+            faces, opts["rotmatrix"]
+        )
+        detected = []
+        scale = opts["scale"]
+        pad_l, pad_t = opts["pads"]
+        rot = opts["rotmatrix"]
+        for face in faces:
+            face = self.to_bounding_box_dict(face[0], face[1], face[2], face[3])
+            if isinstance(rot, np.ndarray):
+                face = self.rotate_rect(face, rot)
+            face = self.to_bounding_box_dict(
+                (face["left"] - pad_l) / scale,
+                (face["top"] - pad_t) / scale,
+                (face["right"] - pad_l) / scale,
+                (face["bottom"] - pad_t) / scale
+            )
+            detected.append(face)
+        logger.trace("Processed Output: %s", detected)
+        return detected
+
 
     # <<< GET MODEL >>> #
     @staticmethod
@@ -198,7 +400,8 @@ class Detector():
         else:
             source = (width * height) ** 0.5
             if isinstance(self.target, tuple):
-                self.target = self.target[0] * self.target[1]
+                #self.target = self.target[0] * self.target[1]
+                target = self.target[0] * self.target[1]
             target = self.target ** 0.5
 
         if scale_up or target < source:
@@ -318,13 +521,24 @@ class Detector():
 
     # << QUEUE METHODS >> #
     def get_item(self):
-        """ Yield one item from the queue """
+        """
+        Yield one item from the input or rotation
+        queue while prioritizing rotation queue to
+        prevent deadlocks.
+        """
+        try:
+            item = self.queues["rotate"].get(block=self.got_input_eof)
+            logger.info("Got item from again queue")
+            return item
+        except queue.Empty:
+            pass
         item = self.queues["in"].get()
         if isinstance(item, dict):
             logger.trace("Item in: %s", item["filename"])
         else:
             logger.trace("Item in: %s", item)
         if item == "EOF":
+            self.got_input_eof = True
             logger.debug("In Queue Exhausted")
             # Re-put EOF into queue for other threads
             self.queues["in"].put(item)

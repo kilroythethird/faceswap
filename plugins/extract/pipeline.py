@@ -8,7 +8,7 @@ so that the vram is released on subprocess exit """
 import logging
 
 from lib.gpu_stats import GPUStats
-from lib.multithreading import PoolProcess, SpawnProcess
+from lib.multithreading import PoolProcess, SpawnProcess, FSThread
 from lib.queue_manager import queue_manager, QueueEmpty
 from plugins.plugin_loader import PluginLoader
 
@@ -105,6 +105,7 @@ class Extractor():
         if not multiprocess:
             logger.debug("Parallel processing disabled by cli.")
             return False
+        return True
 
         gpu_stats = GPUStats()
         if gpu_stats.is_plaidml and (not self.detector.supports_plaidml or
@@ -151,7 +152,7 @@ class Extractor():
             if task == "extract_detect_in" or (not self.is_parallel
                                                and task == "extract_align_in"):
                 size = 64
-            queue_manager.add_queue(task, maxsize=size)
+            queue_manager.add_queue(task, maxsize=size, multiprocessing_queue=task != "extract_detect_in")
             queues[task] = queue_manager.get_queue(task)
         logger.debug("Queues: %s", queues)
         return queues
@@ -213,12 +214,14 @@ class Extractor():
         logger.debug("Launching Detector")
         kwargs = {"in_queue": self.queues["extract_detect_in"],
                   "out_queue": self.queues["extract_align_in"]}
-        mp_func = PoolProcess if self.detector.parent_is_pool else SpawnProcess
-        process = mp_func(self.detector.run, **kwargs)
-
+        #mp_func = FSThread #PoolProcess if self.detector.parent_is_pool else SpawnProcess
+        #process = mp_func(target=self.detector.run, kwargs=kwargs)
+        
+        self.detector.run(**kwargs)
+        process = self.detector
         event = process.event if hasattr(process, "event") else None
         error = process.error if hasattr(process, "error") else None
-        process.start()
+        #process.start()
         self.processes.append(process)
 
         if event is None:
@@ -239,6 +242,7 @@ class Extractor():
             logger.info("Waiting for Detector... Time out in %s minutes", mins)
 
         logger.debug("Launched Detector")
+        return
 
     def detected_faces(self):
         """ Detect faces from in an image """
@@ -246,12 +250,15 @@ class Extractor():
         # If not multiprocessing, intercept the align in queue for
         # detection phase
         out_queue = self.output_queue
+        logger.info("Use detect face")
         while True:
             try:
                 faces = out_queue.get(True, 1)
                 if faces == "EOF":
                     break
-                if isinstance(faces, dict) and faces.get("exception"):
+                if self.phase == "detect":
+                    self.detector.detect_and_raise_errors()
+                elif isinstance(faces, dict) and faces.get("exception"):
                     pid = faces["exception"][0]
                     t_back = faces["exception"][1].getvalue()
                     err = "Error in child process {}. {}".format(pid, t_back)
