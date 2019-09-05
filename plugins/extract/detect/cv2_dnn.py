@@ -16,6 +16,7 @@ class Detect(Detector):
         self.vram = 0
         self.detector = None
         self.confidence = self.config["confidence"] / 100
+        self.batch_size = 8
 
     def initialize(self, *args, **kwargs):
         """ Calculate batch size """
@@ -28,7 +29,47 @@ class Detect(Detector):
         self.init.set()
         logger.info("Initialized cv2 DNN Detector.")
 
-    def detect_faces(self, *args, **kwargs):
+    def compile_batch(self, items, np_data):
+        logger.info("Input to compile: %s", np_data.shape)
+        blob = cv2.dnn.blobFromImages(np_data,  # pylint: disable=no-member
+                             1.0,
+                             self.target,
+                             [104, 117, 123],
+                             False,
+                             False)
+        logger.info("Blobs: %s", blob.shape)
+        return items, blob
+
+    def predict_batch(self, np_batch):
+        self.detector.setInput(np_batch)
+        detected = self.detector.forward()
+        detected = detected.reshape((detected.shape[2]//200, 1, 200, 7))
+        logger.info("Prediction shape: %s", detected.shape)
+        return detected
+
+    def postprocess(self, items, predictions):
+        logger.info("Postprocessing with input %s", predictions.shape)
+        ret = list()
+        width, height = self.target
+        for j in range(predictions.shape[0]): #pred in predictions:
+            pred = predictions[j:j+1, ...]
+            faces = list()
+            for i in range(pred.shape[2]):
+                confidence = pred[0, 0, i, 2]
+                if confidence >= self.confidence:
+                    logger.info("Accepting due to confidence %s >= %s",
+                                 confidence, self.confidence)
+                    faces.append([(pred[0, 0, i, 3] * width),
+                                  (pred[0, 0, i, 4] * height),
+                                  (pred[0, 0, i, 5] * width),
+                                  (pred[0, 0, i, 6] * height)])
+            logger.info("Found %i faces", len(faces))
+            ret.append(faces)
+        return ret
+
+
+
+    def detect_faces_(self, *args, **kwargs):
         """ Detect faces in grayscale image """
         super().detect_faces(*args, **kwargs)
         while True:
@@ -44,7 +85,7 @@ class Detect(Detector):
                 current_image, rotmat = self.rotate_image(detect_image, angle)
                 logger.trace("Detecting faces")
 
-                blob = cv2.dnn.blobFromImage(current_image,  # pylint: disable=no-member
+                blob = cv2.dnn.blobFromImages(current_image,  # pylint: disable=no-member
                                              1.0,
                                              self.target,
                                              [104, 117, 123],
@@ -78,7 +119,7 @@ class Detect(Detector):
         self.queues["out"].put("EOF")
         logger.debug("Detecting Faces Complete")
 
-    def process_output(self, faces, rotation_matrix, scale):
+    def process_output_(self, faces, rotation_matrix, scale):
         """ Compile found faces for output """
         logger.trace("Processing Output: (faces: %s, rotation_matrix: %s)",
                      faces, rotation_matrix)

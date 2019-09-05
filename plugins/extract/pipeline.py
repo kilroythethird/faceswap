@@ -11,6 +11,7 @@ from lib.gpu_stats import GPUStats
 from lib.multithreading import PoolProcess, SpawnProcess, FSThread
 from lib.queue_manager import queue_manager, QueueEmpty
 from plugins.plugin_loader import PluginLoader
+import queue
 
 logger = logging.getLogger(__name__)  # pylint:disable=invalid-name
 
@@ -97,15 +98,17 @@ class Extractor():
         detector_vram = self.detector.vram
         aligner_vram = self.aligner.vram
 
+        if not multiprocess:
+            logger.debug("Parallel processing disabled by cli.")
+            return False
+        return True
+
         if detector_vram == 0 or aligner_vram == 0:
             logger.debug("At least one of aligner or detector have no VRAM requirement. "
                          "Enabling parallel processing.")
             return True
 
-        if not multiprocess:
-            logger.debug("Parallel processing disabled by cli.")
-            return False
-        return True
+        #return True
 
         gpu_stats = GPUStats()
         if gpu_stats.is_plaidml and (not self.detector.supports_plaidml or
@@ -253,17 +256,18 @@ class Extractor():
         logger.info("Use detect face")
         while True:
             try:
-                faces = out_queue.get(True, 1)
-                if faces == "EOF":
-                    break
                 if self.phase == "detect":
                     self.detector.detect_and_raise_errors()
-                elif isinstance(faces, dict) and faces.get("exception"):
+                faces = out_queue.get(False, 1)
+                if faces == "EOF":
+                    break
+                if self.phase != "detect" and isinstance(faces, dict) and faces.get("exception"):
                     pid = faces["exception"][0]
                     t_back = faces["exception"][1].getvalue()
                     err = "Error in child process {}. {}".format(pid, t_back)
                     raise Exception(err)
             except QueueEmpty:
+                
                 continue
 
             yield faces
